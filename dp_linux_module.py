@@ -1047,6 +1047,7 @@ class LinuxMonitorApp(ttk.Frame):
         self._apply_all_filters()
 
     def _update_host(self, h: HostTarget):
+
         found = False
         for idx, cur in enumerate(self.hosts):
             if cur.name == h.name:
@@ -1200,4 +1201,129 @@ class HostEditor(tk.Toplevel):
 
 
 class LinuxPlaceholder(LinuxMonitorApp):
+    pass
+
+
+# ===== Safe handler patch (Linux/Unix) =====
+def _linux__on_button3(self, event):
+    try:
+        self._context_row = self.tree.identify_row(event.y)
+        self._context_col = self.tree.identify_column(event.x)
+        if self._context_row:
+            self.tree.selection_set(self._context_row)
+        self.menu.tk_popup(event.x_root, event.y_root)
+    finally:
+        try:
+            self.menu.grab_release()
+        except Exception:
+            pass
+
+def _linux__select_columns_dialog(self):
+    top = tk.Toplevel(self)
+    top.title("Customize Columns — Linux/Unix")
+    top.resizable(False, False)
+    frm = ttk.Frame(top, padding=10)
+    frm.pack(fill=tk.BOTH, expand=True)
+
+    visible = set(self.tree["displaycolumns"])
+    checks = {}
+    row = 0
+    ttk.Label(frm, text="Show/Hide columns (S.No always visible):", font=("TkDefaultFont", 10, "bold")).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0,6))
+    row += 1
+    for col in self.LOGICAL_COLUMNS:
+        var = tk.BooleanVar(value=(col in visible))
+        if col == "S.No":
+            var.set(True)
+        cb = ttk.Checkbutton(frm, text=col, variable=var)
+        if col == "S.No":
+            cb.state(["disabled"])
+        cb.grid(row=row, column=0, sticky="w", pady=2)
+        checks[col] = var
+        row += 1
+
+    btns = ttk.Frame(frm)
+    btns.grid(row=row, column=0, sticky="ew", pady=(8,0))
+    def apply():
+        new_visible = ["S.No"] + [c for c,v in checks.items() if c != "S.No" and v.get()]
+        order = [c for c in self.cfg.get("column_order", list(self.LOGICAL_COLUMNS)) if c in self.LOGICAL_COLUMNS]
+        display = [c for c in order if c in new_visible]
+        if "S.No" not in display:
+            display = ["S.No"] + [c for c in display if c != "S.No"]
+        self.tree["displaycolumns"] = display
+        self._persist_column_layout()
+        try:
+            self._autosize_columns()
+        except Exception:
+            pass
+        top.destroy()
+
+    ttk.Button(btns, text="Apply", command=apply).pack(side=tk.RIGHT)
+    ttk.Button(btns, text="Cancel", command=top.destroy).pack(side=tk.RIGHT, padx=(0,6))
+
+def _linux__open_filter_dialog(self):
+    top = tk.Toplevel(self)
+    top.title("Filter — Linux/Unix")
+    top.resizable(False, False)
+    frm = ttk.Frame(top, padding=10)
+    frm.pack(fill=tk.BOTH, expand=True)
+
+    listboxes = {}
+    ttk.Label(frm, text="Pick values to INCLUDE for each column (leave empty = no filter):", wraplength=420).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0,8))
+
+    row = 1
+    for col in FILTERABLE_COLUMNS:
+        ttk.Label(frm, text=col + ":").grid(row=row, column=0, sticky="ne", padx=(0,6))
+        lb = tk.Listbox(frm, selectmode=tk.MULTIPLE, width=40, height=6, exportselection=False)
+        vals_set = set()
+        for iid in self.tree.get_children(""):
+            try:
+                idx = self.LOGICAL_COLUMNS.index(col)
+                v = self.tree.item(iid)["values"][idx]
+                vals_set.add(str(v))
+            except Exception:
+                pass
+        for v in sorted(vals_set):
+            lb.insert(tk.END, v)
+        lb.grid(row=row, column=1, sticky="w", pady=(0,6))
+        listboxes[col] = lb
+        row += 1
+
+    def apply():
+        new_filters = {}
+        for col, lb in listboxes.items():
+            sel_idx = lb.curselection()
+            if not sel_idx:
+                new_filters[col] = None
+            else:
+                selected = set(lb.get(i) for i in sel_idx)
+                new_filters[col] = selected
+        self._header_filters = new_filters
+        self._apply_all_filters()
+        self._refresh_heading_labels()
+        top.destroy()
+
+    btns = ttk.Frame(frm)
+    btns.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(6,0))
+    ttk.Button(btns, text="Apply", command=apply).pack(side=tk.RIGHT)
+    ttk.Button(btns, text="Cancel", command=top.destroy).pack(side=tk.RIGHT, padx=(0,6))
+
+def _linux__clear_filter(self):
+    self._active_filter = []
+    self._header_filters = {c: None for c in FILTERABLE_COLUMNS}
+    self._apply_all_filters()
+    self._refresh_heading_labels()
+    try:
+        self.status_var.set("Filters cleared")
+    except Exception:
+        pass
+
+# Bind patches
+try:
+    LinuxMonitorApp._on_button3 = _linux__on_button3
+    LinuxMonitorApp._select_columns_dialog = _linux__select_columns_dialog
+    LinuxMonitorApp._select_column_doalog = _linux__select_columns_dialog  # compatibility alias
+    LinuxMonitorApp._open_filter_dialog = _linux__open_filter_dialog
+    LinuxMonitorApp._clear_filter = _linux__clear_filter
+except Exception as _e:
+    # If class isn't defined for some reason, ignore; import-time error will reveal real issue.
     pass
