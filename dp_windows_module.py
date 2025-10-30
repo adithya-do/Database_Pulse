@@ -459,7 +459,103 @@ class WindowsMonitorApp(ttk.Frame):
         ttk.Button(btns, text="Apply", command=apply_now).pack(side=tk.RIGHT)
         dlg.transient(self); dlg.grab_set(); dlg.wait_window()
 
-    def _clear_filter(self):
+    
+    def _apply_all_filters(self):
+        """
+        Apply both header filters and advanced conditions.
+        Rows that do not pass are detached (hidden) while preserved in self._detached.
+        """
+        import re
+        def get_val(iid: str, col: str) -> str:
+            try:
+                idx = self.LOGICAL_COLUMNS.index(col)
+                vals = self.tree.item(iid)["values"]
+                return "" if idx >= len(vals) else str(vals[idx])
+            except Exception:
+                return ""
+
+        def parse_num(s: str):
+            try:
+                # Extract first numeric token (handles "✅ 92.5%" etc.)
+                m = re.search(r'[-+]?\d+(?:\.\d+)?', s)
+                return float(m.group(0)) if m else None
+            except Exception:
+                return None
+
+        def header_pass(iid: str) -> bool:
+            for col, sel in self._header_filters.items():
+                if sel is None:  # no restriction
+                    continue
+                v = get_val(iid, col)
+                if v not in sel:
+                    return False
+            return True
+
+        def cond_pass(iid: str) -> bool:
+            for col, op, val in self._active_filter:
+                v = get_val(iid, col)
+                if op == "contains":
+                    if val.lower() not in v.lower():
+                        return False
+                elif op == "equals":
+                    if v.lower() != val.lower():
+                        return False
+                elif op in (">", ">=", "<", "<=", "!="):
+                    a = parse_num(v)
+                    b = parse_num(val) if parse_num(val) is not None else None
+                    if a is None or b is None:
+                        return False
+                    if op == ">"  and not (a >  b): return False
+                    if op == ">=" and not (a >= b): return False
+                    if op == "<"  and not (a <  b): return False
+                    if op == "<=" and not (a <= b): return False
+                    if op == "!=" and not (a != b): return False
+                else:
+                    # Unknown op -> fail safe as False
+                    return False
+            return True
+
+        # Evaluate rows
+        current = set(self.tree.get_children(""))
+        all_rows = list(current) + list(self._detached)
+
+        shown = 0
+        for iid in all_rows:
+            try:
+                passes = header_pass(iid) and cond_pass(iid)
+                if passes:
+                    if iid in self._detached:
+                        try:
+                            self.tree.move(iid, "", "end")
+                        except Exception:
+                            pass
+                        self._detached.discard(iid)
+                    shown += 1
+                else:
+                    if iid in current:
+                        try:
+                            self.tree.detach(iid)
+                        except Exception:
+                            pass
+                        self._detached.add(iid)
+            except Exception:
+                # On any per-row error, keep row visible
+                if iid in self._detached:
+                    try:
+                        self.tree.move(iid, "", "end")
+                    except Exception:
+                        pass
+                    self._detached.discard(iid)
+                    shown += 1
+        try:
+            self._renumber()
+        except Exception:
+            pass
+        try:
+            self.status_var.set(f"Filter applied — {shown} row(s) visible")
+        except Exception:
+            pass
+def _clear_filter(self):
         self._active_filter = []
         for k in list(self._header_filters.keys()): self._header_filters[k] = None
         self._refresh_heading_labels()
