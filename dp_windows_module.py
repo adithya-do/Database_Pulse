@@ -640,7 +640,11 @@ def _clear_filter(self):
             else:
                 self.tree.heading(col,text=col,command=lambda c=col: self._sort_by_column(c,False))
 
-    def _toggle_auto(self):
+    def _toggle_auto(self, *args, **kwargs):
+    # Compatibility alias for older callers
+    def toggle_auto(self, *args, **kwargs):
+        return self._toggle_auto(*args, **kwargs)
+
         if self.auto_var.get(): self._start_auto()
         else: self._stop_auto()
         self.cfg["auto_run"]=self.auto_var.get(); save_config(self.cfg)
