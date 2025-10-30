@@ -499,6 +499,197 @@ class SqlServerMonitorApp(ttk.Frame):
 
         self._refresh_heading_labels()
 
+# ---------- Column customization & filters ----------
+def _customize_columns(self):
+    # Alias to the full selector (reorder + visibility)
+    self._select_columns_dialog()
+
+def _select_columns_dialog(self):
+    all_cols = list(self.LOGICAL_COLUMNS)
+    current_visible = list(self.tree["displaycolumns"])
+    if "S.No" not in current_visible:
+        current_visible.insert(0, "S.No")
+    hidden = [c for c in all_cols if c not in current_visible]
+
+    dlg = tk.Toplevel(self)
+    dlg.title("Customize Columns")
+    dlg.geometry("640x360")
+    dlg.resizable(False, False)
+
+    left = ttk.Frame(dlg); left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10,5), pady=10)
+    right = ttk.Frame(dlg); right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5,10), pady=10)
+
+    ttk.Label(left, text="Visible (use buttons to reorder)").pack(anchor="w")
+    lb_vis = tk.Listbox(left, selectmode=tk.EXTENDED, height=12)
+    lb_vis.pack(fill=tk.BOTH, expand=True, pady=(4,6))
+    for c in current_visible:
+        lb_vis.insert(tk.END, c)
+
+    btns = ttk.Frame(left); btns.pack(fill=tk.X, pady=(0,6))
+    def move_up():
+        sel = list(lb_vis.curselection())
+        for i in sel:
+            if i <= 0 or lb_vis.get(i) == "S.No":
+                continue
+            t = lb_vis.get(i)
+            lb_vis.delete(i)
+            lb_vis.insert(i-1, t)
+            lb_vis.selection_set(i-1)
+    def move_down():
+        sel = list(lb_vis.curselection())
+        sel.reverse()
+        for i in sel:
+            if i >= lb_vis.size()-1:
+                continue
+            t = lb_vis.get(i)
+            lb_vis.delete(i)
+            lb_vis.insert(i+1, t)
+            lb_vis.selection_set(i+1)
+    ttk.Button(btns, text="Move Up", command=move_up).pack(side=tk.LEFT)
+    ttk.Button(btns, text="Move Down", command=move_down).pack(side=tk.LEFT, padx=(6,0))
+
+    ttk.Label(right, text="Hidden").pack(anchor="w")
+    lb_hid = tk.Listbox(right, selectmode=tk.EXTENDED, height=12)
+    lb_hid.pack(fill=tk.BOTH, expand=True, pady=(4,6))
+    for c in hidden:
+        lb_hid.insert(tk.END, c)
+
+    xfer = ttk.Frame(dlg); xfer.place(relx=0.48, rely=0.25)
+    def add_to_visible():
+        for i in lb_hid.curselection():
+            c = lb_hid.get(i)
+            if c not in lb_vis.get(0, tk.END):
+                lb_vis.insert(tk.END, c)
+        for i in reversed(lb_hid.curselection()):
+            lb_hid.delete(i)
+    def remove_from_visible():
+        remove = [lb_vis.get(i) for i in lb_vis.curselection() if lb_vis.get(i) != "S.No"]
+        for c in remove:
+            lb_hid.insert(tk.END, c)
+        for i in reversed(lb_vis.curselection()):
+            if lb_vis.get(i) != "S.No":
+                lb_vis.delete(i)
+    ttk.Button(xfer, text="<< Hide", command=remove_from_visible).pack(pady=6)
+    ttk.Button(xfer, text="Show >>", command=add_to_visible).pack(pady=6)
+
+    footer = ttk.Frame(dlg); footer.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=10)
+    def apply_now():
+        new_visible = list(lb_vis.get(0, tk.END))
+        if not new_visible or new_visible[0] != "S.No":
+            new_visible = ["S.No"] + [c for c in new_visible if c != "S.No"]
+        self.tree["displaycolumns"] = new_visible
+        self._persist_column_layout()
+        dlg.destroy()
+    ttk.Button(footer, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT, padx=(6,0))
+    ttk.Button(footer, text="Apply", command=apply_now).pack(side=tk.RIGHT)
+
+    dlg.transient(self); dlg.grab_set(); dlg.wait_window()
+
+def _select_email_columns_dialog(self):
+    all_cols = list(self.LOGICAL_COLUMNS)
+    chosen = list(self.cfg.get("email_columns", all_cols))
+    if "S.No" not in chosen:
+        chosen.insert(0, "S.No")
+
+    dlg = tk.Toplevel(self)
+    dlg.title("Email Columns")
+    dlg.geometry("540x360")
+    dlg.resizable(False, False)
+
+    ttk.Label(dlg, text="Columns included in email (order top-to-bottom):").pack(anchor="w", padx=10, pady=(10,6))
+    lb = tk.Listbox(dlg, selectmode=tk.EXTENDED)
+    lb.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0,6))
+    for c in chosen:
+        lb.insert(tk.END, c)
+    for c in all_cols:
+        if c not in chosen:
+            lb.insert(tk.END, c)
+
+    btns = ttk.Frame(dlg); btns.pack(fill=tk.X, padx=10, pady=(0,10))
+    def move_up():
+        sel = list(lb.curselection())
+        for i in sel:
+            if i <= 0:
+                continue
+            t = lb.get(i)
+            lb.delete(i); lb.insert(i-1, t); lb.selection_set(i-1)
+    def move_down():
+        sel = list(lb.curselection()); sel.reverse()
+        for i in sel:
+            if i >= lb.size()-1:
+                continue
+            t = lb.get(i)
+            lb.delete(i); lb.insert(i+1, t); lb.selection_set(i+1)
+    ttk.Button(btns, text="Move Up", command=move_up).pack(side=tk.LEFT)
+    ttk.Button(btns, text="Move Down", command=move_down).pack(side=tk.LEFT, padx=(6,0))
+
+    def apply_now():
+        ordered = list(lb.get(0, tk.END))
+        seen = set(); final = []
+        for c in ordered:
+            if c not in seen and c in all_cols:
+                seen.add(c); final.append(c)
+        self.cfg["email_columns"] = final
+        save_config(self.cfg)
+        dlg.destroy()
+
+    ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT, padx=(6,0))
+    ttk.Button(btns, text="Apply", command=apply_now).pack(side=tk.RIGHT)
+
+    dlg.transient(self); dlg.grab_set(); dlg.wait_window()
+
+def _open_filter_dialog(self):
+    dlg = tk.Toplevel(self)
+    dlg.title("Advanced Filter")
+    dlg.geometry("600x320")
+    dlg.resizable(False, False)
+
+    container = ttk.Frame(dlg); container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    ttk.Label(container, text="Rows must satisfy ALL of these conditions:").pack(anchor="w")
+
+    rows_frame = ttk.Frame(container); rows_frame.pack(fill=tk.BOTH, expand=True, pady=(6,6))
+
+    conditions = []  # list of (col_var, op_var, val_var)
+
+    def add_condition(initial=None):
+        row = ttk.Frame(rows_frame); row.pack(fill=tk.X, pady=2)
+        col_var = tk.StringVar(value=(initial[0] if initial else "SQL Server Instance"))
+        op_var  = tk.StringVar(value=(initial[1] if initial else "contains"))
+        val_var = tk.StringVar(value=(initial[2] if initial else ""))
+        ttk.Combobox(row, values=list(self.LOGICAL_COLUMNS), textvariable=col_var, state="readonly", width=24).pack(side=tk.LEFT)
+        ttk.Combobox(row, values=["contains","equals",">",">=","<","<=","!="], textvariable=op_var, state="readonly", width=10).pack(side=tk.LEFT, padx=6)
+        ttk.Entry(row, textvariable=val_var, width=28).pack(side=tk.LEFT, padx=6)
+        def remove_row():
+            conditions.remove((col_var, op_var, val_var))
+            row.destroy()
+        ttk.Button(row, text="Remove", command=remove_row).pack(side=tk.LEFT, padx=6)
+        conditions.append((col_var, op_var, val_var))
+
+    for c in self._active_filter:
+        add_condition(c)
+    if not self._active_filter:
+        add_condition()
+
+    btns = ttk.Frame(container); btns.pack(fill=tk.X)
+    ttk.Button(btns, text="Add Condition", command=lambda: add_condition()).pack(side=tk.LEFT)
+
+    def apply_now():
+        self._active_filter = [(c.get(), o.get(), v.get()) for (c, o, v) in conditions if v.get().strip() != ""]
+        self._apply_all_filters()
+        dlg.destroy()
+
+    ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT, padx=(6,0))
+    ttk.Button(btns, text="Apply", command=apply_now).pack(side=tk.RIGHT)
+
+    dlg.transient(self); dlg.grab_set(); dlg.wait_window()
+
+def _clear_filter(self):
+    self._active_filter = []
+    for k in list(self._header_filters.keys()):
+        self._header_filters[k] = None
+    self._refresh_heading_labels()
+    self._apply_all_filters()
+
     # ---------- Header/row right-click routing ----------
     def _on_button3(self, event):
         region = self.tree.identify_region(event.x, event.y)
