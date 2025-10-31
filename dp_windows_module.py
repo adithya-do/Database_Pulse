@@ -615,36 +615,45 @@ class WindowsMonitorApp(tk.Frame):
         self.status_var.set("Completed at " + datetime.now().strftime("%H:%M:%S"))
         self._autosize_columns(); self._apply_all_filters()
 
+    
     def _update_host(self, idx: int, cmn: Optional[Dict[str,str]]):
         h=self.hosts[idx]
-        up = ping_host(h.host, timeout_ms=2000)
-        status="UP" if up else "DOWN"
+
+        # Try connectivity two ways: ping (fast) and PowerShell WMI/CIM (authoritative).
+        ping_ok = ping_host(h.host, timeout_ms=2000)
 
         os_name="Windows"; os_ver=os_ed=sec_kb=mem_gb=cpu_count=mem_pct=cpu_load=disks90=uptime="-"
         err=""; check="Completed"
 
-        if up:
-            common_user = (cmn.get("user") if cmn else "") or ""
-            enc = (cmn.get("password_enc") if cmn else "") or ""
-            pwd = _win_unprotect(enc).decode(errors="ignore") if enc else ""
-            user = h.user or common_user
-            if h.password_enc: pwd = _win_unprotect(h.password_enc).decode(errors="ignore")
-            rc,out,stderr=_collect_ps(h.host, user, pwd, timeout=45)
-            if rc==0 and out.strip():
-                try:
-                    data=json.loads(out.strip().splitlines()[-1])
-                    os_ver=data.get("os_version","-"); os_ed=data.get("os_edition","-")
-                    mem_gb=f"{float(data.get('memory_gb',0.0)):.1f}"
-                    cpu_count=str(int(data.get("cpu_count",0)))
-                    mem_pct=f"{float(data.get('mem_used_pct',0.0)):.1f}%"
-                    cpu_load=f"{float(data.get('cpu_load_pct',0.0)):.1f}"
-                    disks90=str(int(data.get("disks90",0)))
-                    uptime=human_uptime(int(data.get("uptime_sec",0)))
-                    sec_kb=str(data.get("security_patch","")) or "-"
-                except Exception as e:
-                    err=f"parse: {e}"
-            else:
-                err = stderr.strip() or f"ps rc={rc}"
+        # Prepare creds
+        common_user = (cmn.get("user") if cmn else "") or ""
+        enc = (cmn.get("password_enc") if cmn else "") or ""
+        pwd = _win_unprotect(enc).decode(errors="ignore") if enc else ""
+        user = h.user or common_user
+        if h.password_enc:
+            pwd = _win_unprotect(h.password_enc).decode(errors="ignore")
+
+        # Always attempt remote query; if it succeeds, mark as UP even if ping is blocked.
+        rc,out,stderr=_collect_ps(h.host, user, pwd, timeout=45)
+        status="DOWN"
+        if rc==0 and out.strip():
+            try:
+                data=json.loads(out.strip().splitlines()[-1])
+                os_ver=data.get("os_version","-"); os_ed=data.get("os_edition","-")
+                mem_gb=f"{float(data.get('memory_gb',0.0)):.1f}"
+                cpu_count=str(int(data.get("cpu_count",0)))
+                mem_pct=f"{float(data.get('mem_used_pct',0.0)):.1f}%"
+                cpu_load=f"{float(data.get('cpu_load_pct',0.0)):.1f}"
+                disks90=str(int(data.get("disks90",0)))
+                uptime=human_uptime(int(data.get("uptime_sec",0)))
+                sec_kb=str(data.get("security_patch","")) or "-"
+                status="UP"
+            except Exception as e:
+                err=f"parse: {e}"
+                status="UP" if ping_ok else "DOWN"
+        else:
+            err = stderr.strip() or f"ps rc={rc}"
+            status="UP" if ping_ok else "DOWN"
 
         now=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         values=[idx+1, h.name, h.environment, status, os_name, os_ver, os_ed, sec_kb, mem_gb, cpu_count, mem_pct, cpu_load, disks90, uptime, now, check, err]
@@ -653,7 +662,6 @@ class WindowsMonitorApp(tk.Frame):
             if int(self.tree.item(rid)["values"][0])==idx+1: iid=rid; break
         if iid: self.tree.item(iid, values=values)
         else: self.tree.insert("", tk.END, values=values)
-
     # --- JSON Import/Export ---
     def _import_json(self):
         path = fd.askopenfilename(title="Import Windows Config", filetypes=[("JSON","*.json")])
@@ -709,3 +717,7 @@ def create(master): return WindowsMonitorApp(master)
 if __name__ == "__main__":
     root = tk.Tk(); root.title("Database Pulse - Windows Module")
     app = WindowsMonitorApp(root); app.pack(fill="both", expand=True); root.mainloop()
+
+# Compatibility aliases for the launcher
+WindowsMonitorAppAlias = WindowsMonitorApp
+WindowsPlaceholder = WindowsMonitorApp

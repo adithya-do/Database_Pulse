@@ -735,3 +735,7 @@ def create(master): return LinuxMonitorApp(master)
 if __name__ == "__main__":
     root = tk.Tk(); root.title("Database Pulse - Linux/Unix Module")
     app = LinuxMonitorApp(root); app.pack(fill="both", expand=True); root.mainloop()
+
+# Compatibility aliases for the launcher
+LinuxMonitorAppAlias = LinuxMonitorApp
+LinuxPlaceholder = LinuxMonitorApp
