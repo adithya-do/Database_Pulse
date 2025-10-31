@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Windows Servers module for Database Pulse
-# - Works from Windows Server 2008 through 2025 (uses CIM/WMI)
-# - Email toolbar same as Oracle module
-# - Excel-style header filters (right-click on column header)
-# - Uptime column
-# - Disks >90% (count); per-drive columns removed
-# - Security Patch shows 'KB####### YYYY-MM-DD'
-# - Common login or per-host login supported
+# Database Pulse - Windows Servers module
+# Works from Windows Server 2008 through 2025 (CIM/WMI)
+# Email toolbar, excel-style filters, uptime
+# Disks >90% count; Security Patch as 'KB##### yyyy-mm-dd'
 
 from __future__ import annotations
 
@@ -17,29 +13,27 @@ from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog as fd
 from tkinter import font as tkfont
 from typing import Any, Dict, List, Optional, Tuple
 
 APP_NAME = "Database Pulse"
-APP_VERSION = "Database Pulse v1.0"
+DEFAULT_INTERVAL_SEC = 300
 
-# -------- Paths / Config --------
 def _base_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
-CONFIG_DIR = (_base_dir() / "config"); CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+CONFIG_DIR = _base_dir() / "config"
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_PATH = CONFIG_DIR / "windows_config.json"
 
-DEFAULT_INTERVAL_SEC = 300  # 5 minutes
 FILTERABLE_COLUMNS = ("Environment","Status","OS","OS Version","OS Edition")
 
-# -------- Simple password helpers (DPAPI on Windows; base64 elsewhere) --------
 def _win_protect(data: bytes) -> str:
     try:
-        import ctypes, ctypes.wintypes as wt
+        import ctypes, ctypes.wintypes as wt, binascii
         class DATA_BLOB(ctypes.Structure):
             _fields_ = [("cbData", wt.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
         CryptProtectData = ctypes.windll.crypt32.CryptProtectData
@@ -49,15 +43,13 @@ def _win_protect(data: bytes) -> str:
             raise RuntimeError("CryptProtectData failed")
         res = ctypes.string_at(blob_out.pbData, blob_out.cbData)
         ctypes.windll.kernel32.LocalFree(blob_out.pbData)
-        import binascii
         return binascii.b2a_base64(res).decode().strip()
     except Exception:
-        import base64 as b64
-        return b64.b64encode(data).decode()
+        import base64; return base64.b64encode(data).decode()
 
 def _win_unprotect(text: str) -> bytes:
     try:
-        import binascii, ctypes, ctypes.wintypes as wt
+        import ctypes, ctypes.wintypes as wt, binascii
         raw = binascii.a2b_base64(text.encode())
         class DATA_BLOB(ctypes.Structure):
             _fields_ = [("cbData", wt.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
@@ -70,20 +62,16 @@ def _win_unprotect(text: str) -> bytes:
         ctypes.windll.kernel32.LocalFree(blob_out.pbData)
         return res
     except Exception:
-        import base64 as b64
-        return b64.b64decode(text.encode())
+        import base64; return base64.b64decode(text.encode())
 
-# -------- Data model --------
 @dataclass
 class Host:
     name: str
     environment: str
     host: str
-    user: str = ""          # DOMAIN\user or user@domain
+    user: str = ""          # DOMAIN\\user or user@domain
     password_enc: str = ""  # protected or base64
-    # optional: leave user blank to use current login
 
-# -------- Helpers --------
 def load_config() -> Dict[str, Any]:
     if CONFIG_PATH.exists():
         try:
@@ -98,7 +86,8 @@ def load_config() -> Dict[str, Any]:
         "column_order": [],
         "visible_columns": [],
         "email_columns": [],
-        "header_filters": {}
+        "header_filters": {},
+        "interval": DEFAULT_INTERVAL_SEC
     }
 
 def save_config(cfg: Dict[str, Any]):
@@ -106,9 +95,7 @@ def save_config(cfg: Dict[str, Any]):
 
 def human_uptime(sec: int) -> str:
     sec = max(0,int(sec))
-    d, r = divmod(sec, 86400)
-    h, r = divmod(r, 3600)
-    m, _ = divmod(r, 60)
+    d, r = divmod(sec, 86400); h, r = divmod(r, 3600); m, _ = divmod(r, 60)
     if d: return f"{d}d {h}h {m}m"
     if h: return f"{h}h {m}m"
     return f"{m}m"
@@ -123,20 +110,15 @@ def ping_host(host: str, timeout_ms: int = 2000) -> bool:
     except Exception:
         return False
 
-def _collect_ps(host: str, user: str, password: str, timeout: int = 30) -> Tuple[int,str,str]:
-    # Build a PowerShell script to query remote host via CIM/WMI, emit JSON
+def _collect_ps(host: str, user: str, password: str, timeout: int = 40) -> Tuple[int,str,str]:
+    # PowerShell script to query remote host; emits JSON
     ps = r'''
 param([string]$ComputerName,[string]$User,[string]$Pass)
 $ErrorActionPreference = "Stop"
 function Get-OSData([string]$CN,[System.Management.Automation.PSCredential]$cred) {
   try {
     if ($cred) {
-      try {
-        $opt = New-CimSessionOption -Protocol Dcom
-        $sess = New-CimSession -ComputerName $CN -Credential $cred -SessionOption $opt
-      } catch {
-        $sess = $null
-      }
+      try { $opt = New-CimSessionOption -Protocol Dcom; $sess = New-CimSession -ComputerName $CN -Credential $cred -SessionOption $opt } catch { $sess = $null }
     } else {
       try { $sess = New-CimSession -ComputerName $CN } catch { $sess = $null }
     }
@@ -151,8 +133,7 @@ function Get-OSData([string]$CN,[System.Management.Automation.PSCredential]$cred
       $disks = Get-WmiObject -Class Win32_LogicalDisk -ComputerName $CN -Credential $cred -Filter "DriveType=3"
       $hf = Get-WmiObject -Class Win32_QuickFixEngineering -ComputerName $CN -Credential $cred | Sort-Object InstalledOn -Descending | Select-Object -First 1
     }
-    $totalKB = [double]($os.TotalVisibleMemorySize)
-    $freeKB = [double]($os.FreePhysicalMemory)
+    $totalKB = [double]($os.TotalVisibleMemorySize); $freeKB = [double]($os.FreePhysicalMemory)
     $memGB = [Math]::Round(($totalKB*1024)/1GB,1)
     $usedPct = if ($totalKB -gt 0) { [Math]::Round((($totalKB-$freeKB)/$totalKB)*100,1) } else { 0.0 }
     $cpuLoad = if ($cpu -and $cpu.LoadPercentage -ne $null) { [double]$cpu.LoadPercentage } else { 0.0 }
@@ -165,13 +146,10 @@ function Get-OSData([string]$CN,[System.Management.Automation.PSCredential]$cred
     }
     $boot = $os.LastBootUpTime
     try { $uptime = [int](([DateTime]::UtcNow - $boot.ToUniversalTime()).TotalSeconds) } catch { $uptime = 0 }
-    $caption = "" + $os.Caption
-    $version = "" + $os.Version
-    $edition = $caption
+    $caption = "" + $os.Caption; $version = "" + $os.Version; $edition = $caption
     $kb = $null; $kbs = ""; $kdate = $null
     if ($hf) {
-      $kb = $hf.HotFixID
-      $kdate = $hf.InstalledOn
+      $kb = $hf.HotFixID; $kdate = $hf.InstalledOn
       if ($kdate -is [string]) { try { $kdate = [DateTime]::Parse($kdate) } catch { $kdate = $null } }
       $kbs = ($kb + " " + (if ($kdate) { $kdate.ToString("yyyy-MM-dd") } else { "" })).Trim()
     }
@@ -189,11 +167,8 @@ function Get-OSData([string]$CN,[System.Management.Automation.PSCredential]$cred
       host = $CN
     }
     return $out
-  } catch {
-    throw $_
-  }
+  } catch { throw $_ }
 }
-
 $cred = $null
 if ($User -and $Pass) {
   $sec = ConvertTo-SecureString $Pass -AsPlainText -Force
@@ -202,32 +177,14 @@ if ($User -and $Pass) {
 $data = Get-OSData -CN $ComputerName -cred $cred
 $data | ConvertTo-Json -Depth 4 -Compress
 '''
-    # Encode as UTF-16LE for -EncodedCommand
-    b = ps.encode("utf-16le"); enc = base64.b64encode(b).decode()
-    args = ["powershell","-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-EncodedCommand", enc]
-    env = os.environ.copy()
-    # Supply parameters via environment vars and read in PS using param() from ARGV
-    # Easier: append -Command "& { <script> }" is messy with quotes. Using EncodedCommand already includes script; we'll pass args via $env vars.
-    # Modify script to read $env:DP_HOST, etc. Simpler: re-encode script with default param reading from env.
-    # Instead, build a wrapper to set $ComputerName, etc., then invoke the function. For simplicity, we redo enc with variables injected.
-    returncode = 1; out=""; err=""
-    try:
-        # Small wrapper to call the script with params
-        wrapper = f"$ComputerName='{host}'; $User='{user}'; $Pass='{password}'; " + ps + "; $data = & {{ param($ComputerName,$User,$Pass) {ps} }} $ComputerName $User $Pass"
-        # Too complex; alternate approach: inline function and call.
-    except Exception as e:
-        err=str(e)
-        return (returncode,out,err)
-
-    # Simpler: build a -Command that sets vars then executes the script
-    cmd = ["powershell","-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-Command", ps + f"; $ComputerName='{host}'; $User='{user}'; $Pass='{password}'; $data = & {{ param($ComputerName,$User,$Pass) {ps}; Get-OSData -CN $ComputerName -cred $(if($User -and $Pass) {{ $sec=ConvertTo-SecureString $Pass -AsPlainText -Force; New-Object System.Management.Automation.PSCredential($User,$sec) }} else {{ $null }}) }}; $data | ConvertTo-Json -Depth 4 -Compress"]
+    cmd = ["powershell","-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-Command",
+           f"$ComputerName='{host}'; $User='{user}'; $Pass='{password}'; {ps}"]
     try:
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
         return p.returncode, p.stdout, p.stderr
     except Exception as e:
         return 255, "", str(e)
 
-# -------- UI --------
 class WindowsMonitorApp(tk.Frame):
     LOGICAL_COLUMNS = (
         "S.No","Server Name","Environment","Status","OS","OS Version","OS Edition",
@@ -238,25 +195,19 @@ class WindowsMonitorApp(tk.Frame):
     def __init__(self, master):
         super().__init__(master)
         self.cfg = load_config()
-        self._active_filter = []
-        self._header_filters = {c: None for c in FILTERABLE_COLUMNS}
+        self._active_filter: List[Tuple[str,str,str]] = []
+        self._header_filters: Dict[str, Optional[set]] = {c: None for c in FILTERABLE_COLUMNS}
         if isinstance(self.cfg.get("header_filters"), dict):
             for k,v in self.cfg["header_filters"].items():
-                if k in self._header_filters:
-                    self._header_filters[k] = set(v) if isinstance(v, list) else None
-
+                if k in self._header_filters: self._header_filters[k] = set(v) if isinstance(v,list) else None
         self._detached = set()
-
         self._build_ui()
         self._load_hosts()
         self._toggle_timer_running = False
-        self._timer_thread = None
+        self._timer_thread: Optional[threading.Thread] = None
 
-    # ---- Build UI ----
     def _build_ui(self):
         self.grid_rowconfigure(2, weight=1); self.grid_columnconfigure(0, weight=1)
-
-        # Toolbar
         t1 = ttk.Frame(self); t1.grid(row=0,column=0,sticky="ew",padx=8,pady=4)
         ttk.Button(t1,text="Refresh",command=self._refresh_selected).pack(side=tk.LEFT)
         ttk.Button(t1,text="Refresh All",command=self._refresh_all).pack(side=tk.LEFT,padx=(6,4))
@@ -266,19 +217,16 @@ class WindowsMonitorApp(tk.Frame):
         ttk.Button(t1,text="Remove Server",command=self._remove_selected).pack(side=tk.LEFT,padx=(4,0))
         ttk.Button(t1,text="Import Config",command=self._import_json).pack(side=tk.LEFT,padx=(10,0))
         ttk.Button(t1,text="Export Config",command=self._export_json).pack(side=tk.LEFT)
-
         ttk.Separator(t1,orient="vertical").pack(side=tk.LEFT,fill=tk.Y,padx=8)
         ttk.Button(t1,text="Customize Columns",command=self._customize_columns).pack(side=tk.LEFT)
-        ttk.Button(t1,text="Select Columns",command=self._select_columns_dialog).pack(side=tk.LEFT,padx=(4,0))
+        ttk.Button(t1,text="Select Columns",command=self._customize_columns).pack(side=tk.LEFT,padx=(4,0))
         ttk.Button(t1,text="Filter…",command=self._open_filter_dialog).pack(side=tk.LEFT,padx=(4,0))
         ttk.Button(t1,text="Clear Filter",command=self._clear_filter).pack(side=tk.LEFT,padx=(4,0))
-
         ttk.Separator(t1,orient="vertical").pack(side=tk.LEFT,fill=tk.Y,padx=8)
         ttk.Label(t1,text="Interval (sec):").pack(side=tk.LEFT)
         self.interval_var = tk.StringVar(value=str(self.cfg.get("interval", DEFAULT_INTERVAL_SEC)))
         ttk.Entry(t1,textvariable=self.interval_var,width=6).pack(side=tk.LEFT,padx=(2,8))
         self._auto_btn = ttk.Button(t1,text="Start Auto",command=self._toggle_auto); self._auto_btn.pack(side=tk.LEFT)
-
         ttk.Separator(t1,orient="vertical").pack(side=tk.LEFT,fill=tk.Y,padx=8)
         ttk.Button(t1,text="Auth Settings",command=self._auth_settings).pack(side=tk.LEFT)
 
@@ -287,7 +235,7 @@ class WindowsMonitorApp(tk.Frame):
         email_cfg = self.cfg.get("email",{})
         ttk.Label(t2,text="SMTP/Exchange:").pack(side=tk.LEFT)
         self.smtp_server_var = tk.StringVar(value=email_cfg.get("server",""))
-        self.smtp_port_var = tk.IntVar(value=int(email_cfg.get("port",25)))
+        self.smtp_port_var = tk.StringVar(value=str(email_cfg.get("port",25)))
         ttk.Entry(t2,textvariable=self.smtp_server_var,width=22).pack(side=tk.LEFT,padx=(4,2))
         ttk.Entry(t2,textvariable=self.smtp_port_var,width=6).pack(side=tk.LEFT,padx=(2,6))
         ttk.Label(t2,text="From:").pack(side=tk.LEFT)
@@ -300,10 +248,8 @@ class WindowsMonitorApp(tk.Frame):
         ttk.Button(t2,text="Email Columns",command=self._select_email_columns_dialog).pack(side=tk.LEFT,padx=(6,0))
         ttk.Button(t2,text="Email Report",command=self._email_report).pack(side=tk.LEFT,padx=(6,0))
 
-        # Table
         tree_frame = ttk.Frame(self); tree_frame.grid(row=2,column=0,sticky="nsew",padx=8,pady=8)
-        style = ttk.Style(self)
-        style.configure("WIN.Treeview", font=("Segoe UI", 10))
+        style = ttk.Style(self); style.configure("WIN.Treeview", font=("Segoe UI", 10))
         self.tree = ttk.Treeview(tree_frame,columns=self.LOGICAL_COLUMNS,show="headings",height=20,style="WIN.Treeview")
         vsb = ttk.Scrollbar(tree_frame,orient="vertical",command=self.tree.yview)
         xsb = ttk.Scrollbar(tree_frame,orient="horizontal",command=self.tree.xview)
@@ -322,13 +268,11 @@ class WindowsMonitorApp(tk.Frame):
 
         self.tree.bind("<Button-3>", self._on_button3)
 
-        # Bottom bar
         bottombar=ttk.Frame(self); bottombar.grid(row=3,column=0,sticky="ew",padx=8,pady=4)
         self.status_var=tk.StringVar(value="Idle"); ttk.Label(bottombar,textvariable=self.status_var).pack(side=tk.LEFT)
 
         self._refresh_heading_labels()
 
-    # ---- Config/Hosts ----
     def _load_hosts(self):
         self.hosts = [Host(**h) for h in self.cfg.get("hosts",[]) if isinstance(h,dict)]
         self._renumber()
@@ -341,7 +285,6 @@ class WindowsMonitorApp(tk.Frame):
             if c not in seen and c in self.LOGICAL_COLUMNS: new_full.append(c); seen.add(c)
         self.cfg["column_order"]=new_full; self.cfg["visible_columns"]=visible; save_config(self.cfg)
 
-    # ---- Actions ----
     def _add_dialog(self):
         HostEditor(self, on_save=self._add_or_update_host)
 
@@ -390,10 +333,6 @@ class WindowsMonitorApp(tk.Frame):
             self.tree["displaycolumns"]=display; self._persist_column_layout(); dlg.destroy(); self._autosize_columns()
         ttk.Button(dlg,text="Apply",command=apply).grid(row=row,column=0,sticky="e",padx=8,pady=8)
 
-    def _select_columns_dialog(self):
-        return self._customize_columns()
-
-    # ---- Filters ----
     def _open_filter_dialog(self):
         dlg = tk.Toplevel(self); dlg.title("Filter Rows"); dlg.resizable(False,False)
         cols=list(self.tree["columns"]); pad={"padx":6,"pady":4}
@@ -474,18 +413,14 @@ class WindowsMonitorApp(tk.Frame):
 
     def _apply_all_filters(self):
         self._detached = set()
-        allowed = {}
-        for col, sel in self._header_filters.items():
-            if sel is None: continue
-            allowed[col] = set(sel)
+        allowed = {c: set(v) for c,v in self._header_filters.items() if v is not None}
         colidx = {c:i for i,c in enumerate(self.LOGICAL_COLUMNS)}
         for iid in self.tree.get_children(""):
             vals = self.tree.item(iid)["values"]
             show=True
             for col, sel in allowed.items():
                 v = str(vals[colidx[col]]) if col in colidx else ""
-                if len(sel)==0: show=False; break
-                if v not in sel: show=False; break
+                if len(sel)==0 or v not in sel: show=False; break
             if show and self._active_filter:
                 for (c,op,val) in self._active_filter:
                     try:
@@ -500,7 +435,7 @@ class WindowsMonitorApp(tk.Frame):
                             if op=="<=" and not (fv<=vv): show=False; break
                             if op=="!=" and not (fv!=vv): show=False; break
                     except Exception: pass
-            if show:
+            if show: 
                 try: self.tree.reattach(iid,"",tk.END)
                 except Exception: pass
             else:
@@ -509,20 +444,17 @@ class WindowsMonitorApp(tk.Frame):
 
     def _clear_filter(self):
         self._active_filter=[]; self._header_filters={c: None for c in FILTERABLE_COLUMNS}
-        self._apply_all_filters(); self._refresh_heading_labels()
-        self.status_var.set("Filters cleared")
+        self._apply_all_filters(); self._refresh_heading_labels(); self.status_var.set("Filters cleared")
 
     def _on_button3(self, event):
         region = self.tree.identify_region(event.x, event.y)
         if region == "heading":
             colid = self.tree.identify_column(event.x)
             try:
-                idx = int(colid.replace("#","")) - 1
-                col = self.LOGICAL_COLUMNS[idx]
+                idx = int(colid.replace("#","")) - 1; col = self.LOGICAL_COLUMNS[idx]
             except Exception:
                 return
-            if col in FILTERABLE_COLUMNS: self._open_header_filter(col)
-            return
+            if col in FILTERABLE_COLUMNS: self._open_header_filter(col); return
         iid = self.tree.identify_row(event.y)
         if iid: self.tree.selection_set(iid)
         try:
@@ -537,7 +469,6 @@ class WindowsMonitorApp(tk.Frame):
             try: menu.grab_release()
             except Exception: pass
 
-    # ---- Sorting / Sizing ----
     def _sort_by_column(self, col: str, descending: bool):
         try: idx=self.LOGICAL_COLUMNS.index(col)
         except Exception: return
@@ -558,7 +489,7 @@ class WindowsMonitorApp(tk.Frame):
         pad=24; visible=list(self.tree["displaycolumns"]); font=tkfont.nametofont("TkDefaultFont")
         for col in visible:
             header_w=font.measure(col); max_w=header_w
-            for iid in self.tree.get_children("")):
+            for iid in self.tree.get_children(""):
                 vals=self.tree.item(iid)["values"]
                 try:
                     idx=self.LOGICAL_COLUMNS.index(col); txt=str(vals[idx]) if idx<len(vals) else ""
@@ -567,7 +498,6 @@ class WindowsMonitorApp(tk.Frame):
                 w=font.measure(txt); max_w=max(max_w, w)
             self.tree.column(col,width=min(420, max(100, max_w+pad)))
 
-    # ---- Email ----
     def _save_mail_settings(self):
         self.cfg.setdefault("email",{})
         self.cfg["email"]["server"]=self.smtp_server_var.get().strip()
@@ -578,8 +508,7 @@ class WindowsMonitorApp(tk.Frame):
         save_config(self.cfg); messagebox.showinfo(APP_NAME,"Mail settings saved.")
 
     def _build_html(self, rows: List[List]) -> str:
-        headers=[c for c in self.cfg.get("email_columns", list(self.LOGICAL_COLUMNS)) if c in self.LOGICAL_COLUMNS]
-        if not headers: headers=list(self.LOGICAL_COLUMNS)
+        headers=[c for c in self.cfg.get("email_columns", list(self.LOGICAL_COLUMNS)) if c in self.LOGICAL_COLUMNS] or list(self.LOGICAL_COLUMNS)
         def cell_style(text: str, col: str) -> str:
             t=str(text).strip()
             if col=="Memory Usage %":
@@ -599,28 +528,29 @@ class WindowsMonitorApp(tk.Frame):
                 if str(t).upper()=="DOWN": return "background-color:#ffe6e6;color:#7a0000;font-weight:bold;"
             return ""
         thead="<tr>" + "".join(f"<th style='padding:6px 10px;border-bottom:2px solid #ccc;text-align:left'>{h}</th>" for h in headers) + "</tr>"
-        body_rows=[]
+        body=[]
         for r in rows:
             tds=[]
             for col in headers:
                 try: idx=self.LOGICAL_COLUMNS.index(col); val=r[idx]
                 except Exception: val=""
                 style=cell_style(val,col); tds.append(f"<td style='padding:4px 8px;border-bottom:1px solid #eee;{style}'>{val}</td>")
-            body_rows.append("<tr>"+"".join(tds)+"</tr>")
-        table="<table style='border-collapse:collapse;font-family:Segoe UI, Arial, sans-serif;font-size:12px'>"+thead+"".join(body_rows)+"</table>"
-        title=f"<h3>Windows Health Report — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</h3>"
+            body.append("<tr>"+"".join(tds)+"</tr>")
+        table="<table style='border-collapse:collapse;font-family:Segoe UI, Arial, sans-serif;font-size:12px'>"+thead+"".join(body)+"</table>"
+        title=f"<h3>Windows Health Report - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</h3>"
         return "<html><body>"+title+table+"</body></html>"
 
     def _send_html_email(self, server: str, port: int, from_addr: str, to_addrs: List[str], subject: str, html: str):
-        msg=MIMEMultipart("alternative"); msg["Subject"]=subject; msg["From"]=from_addr; msg["To"]=", ".join(to_addrs)
-        part=MIMEText(html,"html","utf-8"); msg.attach(part)
         import smtplib
+        msg=MIMEMultipart("alternative"); msg["Subject"]=subject; msg["From"]=from_addr; msg["To"]=", ".join(to_addrs)
+        msg.attach(MIMEText(html,"html","utf-8"))
         with smtplib.SMTP(server,port,timeout=20) as s: s.sendmail(from_addr,to_addrs,msg.as_string())
 
     def _email_report(self):
         email_cfg=self.cfg.get("email",{})
         server=self.smtp_server_var.get().strip() or email_cfg.get("server","")
-        port=int(self.smtp_port_var.get() or email_cfg.get("port",25))
+        try: port=int(self.smtp_port_var.get() or email_cfg.get("port",25))
+        except Exception: port=25
         from_addr=self.from_var.get().strip() or email_cfg.get("from_addr","")
         to_addrs=self.to_var.get().strip() or email_cfg.get("to_addrs","")
         subject=email_cfg.get("subject","Windows Health Report")
@@ -634,7 +564,6 @@ class WindowsMonitorApp(tk.Frame):
         except Exception as e:
             messagebox.showerror(APP_NAME,f"Failed to send email: {e}")
 
-    # ---- Auth Settings ----
     def _auth_settings(self):
         dlg=tk.Toplevel(self); dlg.title("Auth Settings (Common Login)"); dlg.resizable(False,False)
         pad={"padx":8,"pady":4}
@@ -650,13 +579,10 @@ class WindowsMonitorApp(tk.Frame):
             save_config(self.cfg); dlg.destroy()
         ttk.Button(dlg,text="Save",command=save_now).grid(row=3,column=1,sticky="e",**pad)
 
-    # ---- Refresh / Collect ----
-    def _toggle_auto(self, *args, **kwargs):
+    def _toggle_auto(self):
         if self._toggle_timer_running:
-            self._toggle_timer_running=False; self._auto_btn.configure(text="Start Auto"); self.status_var.set("Auto refresh stopped")
-            return
-        try:
-            interval=int(self.interval_var.get() or DEFAULT_INTERVAL_SEC)
+            self._toggle_timer_running=False; self._auto_btn.configure(text="Start Auto"); self.status_var.set("Auto refresh stopped"); return
+        try: interval=int(self.interval_var.get() or DEFAULT_INTERVAL_SEC)
         except Exception: interval=DEFAULT_INTERVAL_SEC
         self.cfg["interval"]=interval; save_config(self.cfg)
         self._toggle_timer_running=True; self._auto_btn.configure(text="Stop Auto")
@@ -702,8 +628,7 @@ class WindowsMonitorApp(tk.Frame):
             enc = (cmn.get("password_enc") if cmn else "") or ""
             pwd = _win_unprotect(enc).decode(errors="ignore") if enc else ""
             user = h.user or common_user
-            if h.password_enc:
-                pwd = _win_unprotect(h.password_enc).decode(errors="ignore")
+            if h.password_enc: pwd = _win_unprotect(h.password_enc).decode(errors="ignore")
             rc,out,stderr=_collect_ps(h.host, user, pwd, timeout=45)
             if rc==0 and out.strip():
                 try:
@@ -717,11 +642,9 @@ class WindowsMonitorApp(tk.Frame):
                     uptime=human_uptime(int(data.get("uptime_sec",0)))
                     sec_kb=str(data.get("security_patch","")) or "-"
                 except Exception as e:
-                    err=f"parse: {e}"; check="Completed"
+                    err=f"parse: {e}"
             else:
                 err = stderr.strip() or f"ps rc={rc}"
-        else:
-            check="Completed"
 
         now=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         values=[idx+1, h.name, h.environment, status, os_name, os_ver, os_ed, sec_kb, mem_gb, cpu_count, mem_pct, cpu_load, disks90, uptime, now, check, err]
@@ -731,7 +654,29 @@ class WindowsMonitorApp(tk.Frame):
         if iid: self.tree.item(iid, values=values)
         else: self.tree.insert("", tk.END, values=values)
 
-# ---- Add/Edit Host dialog ----
+    # --- JSON Import/Export ---
+    def _import_json(self):
+        path = fd.askopenfilename(title="Import Windows Config", filetypes=[("JSON","*.json")])
+        if not path: return
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            if isinstance(data.get("hosts"), list):
+                self.cfg["hosts"]=data["hosts"]
+            for k in ("use_common_login","common_login","email"):
+                if k in data: self.cfg[k]=data[k]
+            save_config(self.cfg); self._load_hosts(); messagebox.showinfo(APP_NAME,"Imported.")
+        except Exception as e:
+            messagebox.showerror(APP_NAME, f"Import failed: {e}")
+
+    def _export_json(self):
+        path = fd.asksaveasfilename(title="Export Windows Config", defaultextension=".json", filetypes=[("JSON","*.json")])
+        if not path: return
+        try:
+            Path(path).write_text(json.dumps(self.cfg, indent=2), encoding="utf-8")
+            messagebox.showinfo(APP_NAME,"Exported.")
+        except Exception as e:
+            messagebox.showerror(APP_NAME, f"Export failed: {e}")
+
 class HostEditor(tk.Toplevel):
     def __init__(self, app: WindowsMonitorApp, target: Optional[Host] = None, on_save=None):
         super().__init__(app); self.app=app; self.target=target; self.on_save=on_save
@@ -759,12 +704,8 @@ class HostEditor(tk.Toplevel):
         ttk.Button(btns,text="Save",command=save).pack(side=tk.RIGHT)
         ttk.Button(btns,text="Cancel",command=self.destroy).pack(side=tk.RIGHT,padx=(0,6))
 
-# Public factory
 def create(master): return WindowsMonitorApp(master)
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    root.title("Database Pulse — Windows Module")
-    app = WindowsMonitorApp(root)
-    app.pack(fill="both", expand=True)
-    root.mainloop()
+    root = tk.Tk(); root.title("Database Pulse - Windows Module")
+    app = WindowsMonitorApp(root); app.pack(fill="both", expand=True); root.mainloop()
