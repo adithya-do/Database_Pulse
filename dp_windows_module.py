@@ -662,7 +662,20 @@ class WindowsMonitorApp(tk.Frame):
             if int(self.tree.item(rid)["values"][0])==idx+1: iid=rid; break
         if iid: self.tree.item(iid, values=values)
         else: self.tree.insert("", tk.END, values=values)
-    # --- JSON Import/Export ---
+    
+    def _select_email_columns_dialog(self):
+        dlg=tk.Toplevel(self); dlg.title("Email Columns"); dlg.resizable(False,False)
+        all_cols=list(self.LOGICAL_COLUMNS); current=list(self.cfg.get("email_columns", all_cols))
+        checks={}; row=0
+        ttk.Label(dlg,text="Pick columns to include in email:",font=("TkDefaultFont",10,"bold")).grid(row=row,column=0,sticky="w",padx=8,pady=(8,4)); row+=1
+        for c in all_cols:
+            var=tk.BooleanVar(value=(c in current)); ttk.Checkbutton(dlg,text=c,variable=var).grid(row=row,column=0,sticky="w",padx=8,pady=2); checks[c]=var; row+=1
+        def apply_close():
+            selected=[c for c,v in checks.items() if v.get() and c in all_cols] or list(all_cols)
+            self.cfg["email_columns"]=selected; save_config(self.cfg)
+            messagebox.showinfo(APP_NAME,f"Email columns updated ({len(selected)})"); dlg.destroy()
+        ttk.Button(dlg,text="Apply",command=apply_close).grid(row=row,column=0,sticky="e",padx=8,pady=8)
+# --- JSON Import/Export ---
     def _import_json(self):
         path = fd.askopenfilename(title="Import Windows Config", filetypes=[("JSON","*.json")])
         if not path: return
@@ -721,3 +734,16 @@ if __name__ == "__main__":
 # Compatibility aliases for the launcher
 WindowsMonitorAppAlias = WindowsMonitorApp
 WindowsPlaceholder = WindowsMonitorApp
+
+
+# --- Compatibility shims expected by some launchers ---
+def _select_email_columns_dialog(app=None):
+    try:
+        if app and hasattr(app, '_select_email_columns_dialog'):
+            return app._select_email_columns_dialog()
+    except Exception:
+        pass
+    return None
+
+# Historical typo alias
+_select_column_doalog = _select_email_columns_dialog

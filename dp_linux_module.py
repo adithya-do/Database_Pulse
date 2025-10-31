@@ -79,6 +79,7 @@ class Host:
     auth: str = "key"   # key | password
     password_enc: str = ""
     key_path: str = ""
+    port: int = 22
 
 def load_config() -> Dict[str, Any]:
     if CONFIG_PATH.exists():
@@ -129,7 +130,7 @@ def _ssh_exec(host: Host, cmd: str, common: Optional[Dict[str,str]] = None, time
         try:
             ssh = paramiko.SSHClient(); ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             if auth == "password" and password:
-                ssh.connect(hostname=host.host, username=user, password=password, timeout=timeout, allow_agent=False, look_for_keys=False)
+                ssh.connect(hostname=host.host, port=getattr(host,'port',22), username=user, password=password, timeout=timeout, allow_agent=False, look_for_keys=False)
             else:
                 pkey=None
                 if key_path and os.path.exists(key_path):
@@ -138,7 +139,7 @@ def _ssh_exec(host: Host, cmd: str, common: Optional[Dict[str,str]] = None, time
                         try:
                             pkey = Key.from_private_key_file(key_path); break
                         except Exception: pass
-                ssh.connect(hostname=host.host, username=user, pkey=pkey, timeout=timeout)
+                ssh.connect(hostname=host.host, port=getattr(host,'port',22), username=user, pkey=pkey, timeout=timeout)
             _, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
             out = stdout.read().decode("utf-8", errors="ignore"); err = stderr.read().decode("utf-8", errors="ignore")
             rc = stdout.channel.recv_exit_status(); ssh.close()
@@ -146,7 +147,7 @@ def _ssh_exec(host: Host, cmd: str, common: Optional[Dict[str,str]] = None, time
         except Exception as e:
             return 255, "", str(e)
 
-    base = ["ssh","-o","BatchMode=yes","-o","StrictHostKeyChecking=no","-o",f"ConnectTimeout={timeout}",f"{user}@{host.host}",cmd]
+    base = ["ssh","-o","BatchMode=yes","-o","StrictHostKeyChecking=no","-o",f"ConnectTimeout={timeout}","-p",str(getattr(host,'port',22)),f"{user}@{host.host}",cmd]
     try:
         p = subprocess.run(base, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout+5)
         return p.returncode, p.stdout, p.stderr
@@ -287,7 +288,14 @@ class LinuxMonitorApp(tk.Frame):
         self._refresh_heading_labels()
 
     def _load_hosts(self):
-        self.hosts = [Host(**h) for h in self.cfg.get("hosts",[]) if isinstance(h,dict)]
+        self.hosts = []
+        for h in self.cfg.get("hosts",[]):
+            if isinstance(h,dict):
+                allowed = {k:h[k] for k in h.keys() if k in {'name','environment','host','user','auth','password_enc','key_path','port'}}
+                if 'port' in h and not isinstance(h.get('port',22), int):
+                    try: allowed['port']=int(h.get('port',22))
+                    except Exception: allowed['port']=22
+                self.hosts.append(Host(**allowed))
         self._renumber()
 
     def _persist_column_layout(self):
